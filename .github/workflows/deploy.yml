@@ -52,10 +52,18 @@ jobs:
     #    돌 수 있고, 그때 이 워크플로는 기본 브랜치 컨텍스트(ref=main)로 실행된다. 그러면
     #    비-main 이미지가 main 신원의 OIDC 토큰을 달고 배포 요청이 된다 — agent의 ref 결박이
     #    CD층에서 우회된다. 그래서 빌드가 선 브랜치가 기본 브랜치인지 여기서 함께 본다.
+    # ⚠️ 브랜치 이름만으로는 또 부족하다 — fork에서 온 빌드의 head_branch는 fork 쪽 이름이라
+    #    공격자가 자기 fork의 브랜치를 "main"으로 지으면 그대로 통과한다. 그때 이 워크플로는
+    #    base repo 컨텍스트(정상 HMAC 시크릿 + main 신원 OIDC)로 돌기 때문에, 남의 커밋이
+    #    우리 신원으로 배포 요청이 된다. 그래서 빌드가 선 저장소가 우리인지까지 본다.
+    #    event == 'push'는 그 위의 한 겹 — 기본 브랜치에 실제로 머지된 빌드만 자동 배포로
+    #    잇는다(수동 빌드로 배포하고 싶으면 이 워크플로의 workflow_dispatch를 쓴다).
     # 수동 dispatch는 조건 없이 진행한다.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
        github.event.workflow_run.head_branch == github.event.repository.default_branch)
     env:
       IMAGE_REPO: ghcr.io/jun-bank/gateway
