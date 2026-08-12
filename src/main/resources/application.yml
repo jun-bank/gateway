@@ -9,15 +9,11 @@ spring:
       routes:
         # 각 도메인 서버는 compose 서비스명(host)·포트 8080으로 뜬다.
         # StripPrefix=1 로 프리픽스 세그먼트를 제거해 도메인 서버의 루트(/) 기준 경로로 넘긴다.
-        #   /core        -> core:8080  /      (PathPattern `/core/**` 은 프리픽스 세그먼트만 있는 `/core` 도 매칭한다)
-        #   /core/        -> core:8080  /
-        #   /core/health -> core:8080  /health
-        - id: core
-          uri: http://core:8080
-          predicates:
-            - Path=/core/**
-          filters:
-            - StripPrefix=1
+        #   /settlement        -> settlement:8080  /   (PathPattern `/settlement/**` 은 프리픽스 세그먼트만 있는 `/settlement` 도 매칭한다)
+        #   /settlement/health -> settlement:8080  /health
+        #
+        # core 라우트는 여기 없다 — 블루-그린 전환 대상이라 프로그램 라우트로 관리한다
+        # (CoreRouteRegistry, 아래 junbank.routes.core 설정).
         - id: settlement
           uri: http://settlement:8080
           predicates:
@@ -30,6 +26,16 @@ spring:
             - Path=/ledger/**
           filters:
             - StripPrefix=1
+
+# 블루-그린 전환 대상인 core 라우트의 slot → URI 매핑.
+# 이 매핑의 소유자는 배포 환경(환경변수)이다 — 게이트웨이는 지금 어느 slot이 활성인지만
+# 관리하고, 전환은 POST /internal/routes/core/switch 로 받는다(ADR-031 BG-1 · BG-4 ⓐ).
+junbank:
+  routes:
+    core:
+      blue-uri: ${CORE_BLUE_URI:http://host.docker.internal:13001}
+      green-uri: ${CORE_GREEN_URI:http://host.docker.internal:13002}
+      active-slot: ${CORE_ACTIVE_SLOT:blue}
 
 # 게이트웨이 자신의 준비성만 노출한다(GET /actuator/health).
 management:
