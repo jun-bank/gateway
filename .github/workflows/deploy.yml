@@ -1,0 +1,179 @@
+name: deploy-request
+
+# main에 이미지가 올라간 뒤(build-and-push 성공) 배포-agent에 배포를 "요청"한다.
+# 실행은 agent가 한다 — 이 워크플로는 서명된 요청 하나를 만들 뿐이다(ADR-027 RL-7:
+# 배포 실행 주체는 agent 하나, 서비스는 요청만 한다).
+#
+# 요청 = manifest(JSON body) + 게이트 2개:
+#   게이트 1 (HMAC)  : canonical = "POST\n/deploy\nsha256:<body>\n<reqId>\n<issued>\n<expires>"
+#                      → HMAC-SHA256(AGENT_HMAC_KEY, canonical) → hex → X-Deploy-Signature
+#                      (auth.Canonicalize / auth.Sign 과 짝 — 한쪽만 바뀌면 전부 불일치)
+#   게이트 2 (OIDC)  : GitHub Actions id-token(audience=OIDC_AUDIENCE) → X-Deploy-Oidc-Token
+#                      claim 행렬(iss·aud·repository·repository_id·owner_id·ref·job_workflow_ref)이
+#                      agent의 OIDC_* 정책과 정확히 일치해야 통과(internal/auth/oidc.go checkClaims).
+#
+# ⚠️ job_workflow_ref 결박: 이 파일 경로·이름(deploy.yml)·브랜치(main)가 agent의
+#    OIDC_JOB_WORKFLOW_REF=jun-bank/gateway/.github/workflows/deploy.yml@refs/heads/main 과
+#    정확히 같아야 게이트 2를 통과한다. 파일명·위치를 바꾸면 agent 설정도 함께 바꿔야 한다.
+#
+# ⚠️ target=gateway 의 배포 방식은 코어와 다르다 — **재기동 교체이지 블루-그린이 아니다**
+#    (ADR-027 DO-20 v0.5 ⓐ): 게이트웨이는 블루-그린 전환 수단(SCG 라우트)의 소유자라
+#    자기 자신의 전환을 자기가 할 수 없다(자기 참조). v1은 짧은 중단을 수용하고
+#    재기동으로 교체한다(영향 채널은 사람 채널뿐). 이 워크플로가 만드는 요청의 계약은
+#    코어와 같고, 무중단 여부는 agent 쪽 배포 모드가 정한다.
+
+on:
+  # CI(build-and-push)가 main에서 성공하면 자동으로 배포를 요청한다.
+  workflow_run:
+    workflows: ["build-and-push"]
+    types: [completed]
+  # 수동 트리거(첫 e2e·재배포용). sha를 비우면 현재 main HEAD.
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "배포할 커밋 SHA (비우면 현재 main HEAD)"
+        required: false
+
+permissions:
+  contents: read
+  packages: read     # GHCR 이미지 digest 조회
+  id-token: write     # 게이트 2 OIDC 토큰 발급
+
+# 배포 요청은 동시에 하나만 — 겹친 요청이 배포 창 락을 두고 경합하지 않도록 직렬화한다.
+concurrency:
+  group: deploy-gateway
+  cancel-in-progress: false
+
+jobs:
+  request-deploy:
+    runs-on: ubuntu-latest
+    # workflow_run으로 왔으면 CI가 성공했을 때만(실패한 빌드의 이미지를 배포하지 않는다).
+    # 수동 dispatch는 조건 없이 진행한다.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    env:
+      IMAGE_REPO: ghcr.io/jun-bank/gateway
+      AGENT_URL: https://deploy.junproject.xyz/deploy
+      OIDC_AUDIENCE: https://deploy.junproject.xyz
+      TARGET: gateway
+    steps:
+      - name: 배포 대상 SHA 확정
+        id: sha
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            SHA="${{ github.event.workflow_run.head_sha }}"
+          elif [ -n "${{ github.event.inputs.sha }}" ]; then
+            SHA="${{ github.event.inputs.sha }}"
+          else
+            SHA="${{ github.sha }}"
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "배포 대상 커밋: $SHA"
+
+      - name: GHCR 로그인
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 이미지 digest 조회 (내용 주소 고정 — 태그 금지)
+        id: digest
+        run: |
+          set -euo pipefail
+          SHA="${{ steps.sha.outputs.sha }}"
+          DIGEST=$(docker buildx imagetools inspect "${IMAGE_REPO}:${SHA}" --format '{{.Manifest.Digest}}')
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::이미지 digest 형식 오류(sha256:64hex 아님): '$DIGEST'"
+            exit 1
+          fi
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "이미지: ${IMAGE_REPO}@${DIGEST}"
+
+      - name: manifest 조립 + 서명 + 배포 요청 전송
+        # ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN 은 id-token: write 권한이 있으면 런너가
+        # 런타임 환경변수로 자동 주입한다 — env로 다시 매핑하지 않는다(빈 값으로 덮일 위험).
+        env:
+          AGENT_HMAC_KEY: ${{ secrets.AGENT_HMAC_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AGENT_HMAC_KEY:-}" ]; then
+            echo "::error::AGENT_HMAC_KEY 시크릿이 비어 있다(조직 시크릿 AGENT_HMAC_KEY 확인)"
+            exit 1
+          fi
+
+          SHA="${{ steps.sha.outputs.sha }}"
+          DIGEST="${{ steps.digest.outputs.digest }}"
+          REQ_ID="gateway-${{ github.run_id }}-${{ github.run_attempt }}"
+          ISSUED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          EXPIRES=$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ)
+
+          # manifest(DO-18 6칸). composeRevision·configVersion은 현재 placeholder다 —
+          # 호스트 compose provisioning(ADR-030 compose-in-manifest)·config 전달(#19)이
+          # 실행에 결박되기 전까지 서명·이력에만 남고 dispatch 동작은 imageDigest로 고정된다.
+          # ⚠️ gateway는 재기동 교체라 green/blue 슬롯 이름이 없다(DO-20 v0.5 ⓐ) — 그래서
+          # composeRevision도 "gateway-v1"이지 코어처럼 "-green-" 을 달지 않는다.
+          # jq -c 로 결정적 바이트를 만든다(digest·서명이 그 바이트에 정확히 걸린다).
+          jq -nc \
+            --arg target "$TARGET" \
+            --arg commitSha "$SHA" \
+            --arg imageDigest "$DIGEST" \
+            --arg composeRevision "gateway-v1" \
+            --arg configVersion "v1" \
+            --arg requestId "$REQ_ID" \
+            '{target:$target, commitSha:$commitSha, imageDigest:$imageDigest, composeRevision:$composeRevision, configVersion:$configVersion, requestId:$requestId}' \
+            > manifest.json
+
+          # 게이트 1 — body digest("sha256:"+hex) + canonical 문자열(개행 조인·trailing 없음) + HMAC hex.
+          BODY_HEX=$(sha256sum manifest.json | cut -d' ' -f1)
+          BODY_DIGEST="sha256:${BODY_HEX}"
+          printf '%s\n%s\n%s\n%s\n%s\n%s' "POST" "/deploy" "$BODY_DIGEST" "$REQ_ID" "$ISSUED" "$EXPIRES" > canonical.bin
+          SIG=$(openssl dgst -sha256 -hmac "$AGENT_HMAC_KEY" -binary canonical.bin | xxd -p -c 256)
+          if [[ ! "$SIG" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::HMAC 서명 생성 실패"
+            exit 1
+          fi
+
+          # 게이트 2 — OIDC id-token(우리 배포 전용 audience). 값은 마스킹한다.
+          OIDC_TOKEN=$(curl -sf \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OIDC_AUDIENCE}" | jq -r '.value')
+          if [ -z "$OIDC_TOKEN" ] || [ "$OIDC_TOKEN" = "null" ]; then
+            echo "::error::OIDC 토큰 발급 실패(id-token: write 권한·audience 확인)"
+            exit 1
+          fi
+          echo "::add-mask::$OIDC_TOKEN"
+
+          echo "→ 배포 요청: target=$TARGET reqId=$REQ_ID digest=$DIGEST"
+          echo "  issued=$ISSUED expires=$EXPIRES bodyDigest=$BODY_DIGEST"
+
+          # 전송 — 서명·digest를 계산한 바로 그 바이트(manifest.json)를 그대로 body로 보낸다.
+          HTTP_CODE=$(curl -sS -o resp.txt -w '%{http_code}' -X POST "$AGENT_URL" \
+            -H "Content-Type: application/json" \
+            -H "X-Deploy-Request-Id: $REQ_ID" \
+            -H "X-Deploy-Issued-At: $ISSUED" \
+            -H "X-Deploy-Expires-At: $EXPIRES" \
+            -H "X-Deploy-Signature: $SIG" \
+            -H "X-Deploy-Oidc-Token: $OIDC_TOKEN" \
+            --data-binary @manifest.json)
+
+          echo "← HTTP $HTTP_CODE"
+          echo "응답 본문:"; cat resp.txt || true; echo
+          {
+            echo "### 배포 요청 결과"
+            echo "- target: \`$TARGET\` (재기동 교체 — 블루-그린 아님 · DO-20 v0.5 ⓐ)"
+            echo "- reqId: \`$REQ_ID\`"
+            echo "- 이미지: \`${IMAGE_REPO}@${DIGEST}\`"
+            echo "- HTTP: \`$HTTP_CODE\`"
+            echo "- 응답: \`$(cat resp.txt 2>/dev/null | head -c 300)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # 2xx만 성공. 그 외는 실패로 드러낸다(조용한 성공 위장 금지).
+          if [[ "$HTTP_CODE" =~ ^2 ]]; then
+            echo "배포 요청 성공 (agent 수신·처리 완료)"
+          else
+            echo "::error::배포 요청 실패 — HTTP $HTTP_CODE ($(cat resp.txt 2>/dev/null | head -c 200))"
+            exit 1
+          fi
