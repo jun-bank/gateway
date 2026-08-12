@@ -48,10 +48,15 @@ jobs:
   request-deploy:
     runs-on: ubuntu-latest
     # workflow_run으로 왔으면 CI가 성공했을 때만(실패한 빌드의 이미지를 배포하지 않는다).
+    # ⚠️ 성공 여부만으로는 부족하다 — build-and-push는 workflow_dispatch로 아무 브랜치에서나
+    #    돌 수 있고, 그때 이 워크플로는 기본 브랜치 컨텍스트(ref=main)로 실행된다. 그러면
+    #    비-main 이미지가 main 신원의 OIDC 토큰을 달고 배포 요청이 된다 — agent의 ref 결박이
+    #    CD층에서 우회된다. 그래서 빌드가 선 브랜치가 기본 브랜치인지 여기서 함께 본다.
     # 수동 dispatch는 조건 없이 진행한다.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == github.event.repository.default_branch)
     env:
       IMAGE_REPO: ghcr.io/jun-bank/gateway
       AGENT_URL: https://deploy.junproject.xyz/deploy
@@ -60,14 +65,28 @@ jobs:
     steps:
       - name: 배포 대상 SHA 확정
         id: sha
+        # ⚠️ 표현식 보간값은 셸 스크립트 본문에 직접 넣지 않는다 — 보간은 셸이 읽기 전에
+        #    일어나므로 사용자가 넣은 문자열이 그대로 명령이 된다(입력 sha 한 칸으로
+        #    AGENT_HMAC_KEY·OIDC 토큰까지 닿는다). env로 넘기고 셸에서는 "$VAR"만 쓴다.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_SHA: ${{ github.event.inputs.sha }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_run" ]; then
-            SHA="${{ github.event.workflow_run.head_sha }}"
-          elif [ -n "${{ github.event.inputs.sha }}" ]; then
-            SHA="${{ github.event.inputs.sha }}"
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            SHA="$RUN_SHA"
+          elif [ -n "${INPUT_SHA:-}" ]; then
+            SHA="$INPUT_SHA"
           else
-            SHA="${{ github.sha }}"
+            SHA="$HEAD_SHA"
+          fi
+          # 값 자체도 검증한다(env 인용은 주입을 막고, 이 검사는 쓰레기 값이 이미지 태그·
+          # manifest·서명까지 흘러가는 것을 막는다). 빈 입력은 위에서 이미 HEAD로 간다.
+          if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::배포 대상 SHA 형식 오류(40자리 소문자 hex 아님): '$SHA'"
+            exit 1
           fi
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "배포 대상 커밋: $SHA"
@@ -81,9 +100,10 @@ jobs:
 
       - name: 이미지 digest 조회 (내용 주소 고정 — 태그 금지)
         id: digest
+        env:
+          SHA: ${{ steps.sha.outputs.sha }}
         run: |
           set -euo pipefail
-          SHA="${{ steps.sha.outputs.sha }}"
           DIGEST=$(docker buildx imagetools inspect "${IMAGE_REPO}:${SHA}" --format '{{.Manifest.Digest}}')
           if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "::error::이미지 digest 형식 오류(sha256:64hex 아님): '$DIGEST'"
@@ -97,6 +117,10 @@ jobs:
         # 런타임 환경변수로 자동 주입한다 — env로 다시 매핑하지 않는다(빈 값으로 덮일 위험).
         env:
           AGENT_HMAC_KEY: ${{ secrets.AGENT_HMAC_KEY }}
+          SHA: ${{ steps.sha.outputs.sha }}
+          DIGEST: ${{ steps.digest.outputs.digest }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
           if [ -z "${AGENT_HMAC_KEY:-}" ]; then
@@ -104,9 +128,7 @@ jobs:
             exit 1
           fi
 
-          SHA="${{ steps.sha.outputs.sha }}"
-          DIGEST="${{ steps.digest.outputs.digest }}"
-          REQ_ID="gateway-${{ github.run_id }}-${{ github.run_attempt }}"
+          REQ_ID="gateway-${RUN_ID}-${RUN_ATTEMPT}"
           ISSUED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           EXPIRES=$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ)
 
