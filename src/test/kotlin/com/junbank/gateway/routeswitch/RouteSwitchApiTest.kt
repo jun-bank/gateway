@@ -130,6 +130,8 @@ class RouteSwitchApiTest {
             .expectBody()
             .jsonPath("$.error").isEqualTo("stale fencing token")
             .jsonPath("$.lastAcceptedToken").isEqualTo(5)
+            // 전환 시도 자체가 없었다 = 미전환 보증(호출자가 실패의 보증 수준을 구별한다)
+            .jsonPath("$.state").isEqualTo("NOT_ATTEMPTED")
 
         // stale 실행자의 write는 최종 상태가 되지 않는다(ADR-031 BG-4 ⓐ 계약)
         expectCorePingBody("green")

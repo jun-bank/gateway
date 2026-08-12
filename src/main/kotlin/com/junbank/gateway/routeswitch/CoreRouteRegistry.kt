@@ -1,5 +1,6 @@
 package com.junbank.gateway.routeswitch
 
+import org.slf4j.LoggerFactory
 import org.springframework.cloud.gateway.filter.FilterDefinition
 import org.springframework.cloud.gateway.handler.predicate.PredicateDefinition
 import org.springframework.cloud.gateway.route.RouteDefinition
@@ -20,23 +21,48 @@ const val CORE_ROUTE_ID = "core"
  * 게이트웨이는 이 스냅샷 하나만 보고 라우트를 만들고, /internal API도 이 스냅샷을 읽어
  * 답한다(따로 캐시한 사본을 만들지 않는다).
  *
- * 알려진 잔여(v1 수용): 상태가 인메모리라 게이트웨이가 재시작하면
- * activeSlot = CORE_ACTIVE_SLOT, lastAcceptedToken = 0 으로 리셋된다. 즉 재시작 직후의
- * 짧은 창에서는 이미 지나간 낮은 token을 든 stale 실행자의 write가 한 번 수락될 수 있다.
- * (fencing의 지속화는 후속 결정 — 지금은 이 창을 알려진 리스크로 남긴다.)
+ * `lastAcceptedToken` 계약: fencing token 은 **int64 양수(≥1)** 이고, 아직 전환이 없었음을
+ * 뜻하는 0 만이 예외다. 전환은 단조 증가 방향으로만 수락된다(같은 값 재요청은 멱등).
+ *
+ * 기동 시 상태: `CORE_STATE_FILE`이 설정돼 있고 파일이 읽히면 그 {slot, token}으로 복원하고
+ * (env `CORE_ACTIVE_SLOT`보다 우선), 아니면 activeSlot = CORE_ACTIVE_SLOT · token = 0 이다.
+ *
+ * 알려진 잔여(지속화를 끈 경우 = `CORE_STATE_FILE` 미설정): 상태가 인메모리라 게이트웨이가
+ * 재시작하면 activeSlot = CORE_ACTIVE_SLOT, lastAcceptedToken = 0 으로 리셋된다. 즉 재시작
+ * 직후의 짧은 창에서는 이미 지나간 낮은 token을 든 stale 실행자의 write가 한 번 수락될 수 있다.
  */
 @Component
-class CoreRouteRegistry(private val properties: CoreRouteProperties) : RouteDefinitionRepository {
+class CoreRouteRegistry(
+    private val properties: CoreRouteProperties,
+    private val stateStore: CoreStateStore,
+) : RouteDefinitionRepository {
 
     data class Snapshot(val slot: Slot, val lastAcceptedToken: Long)
 
+    private val log = LoggerFactory.getLogger(javaClass)
+
     // 읽기는 요청 스레드 여러 곳에서, 쓰기는 RouteSwitchService의 단일 지점에서만 일어난다.
     @Volatile
-    private var snapshot: Snapshot = Snapshot(
-        slot = Slot.parseOrNull(properties.activeSlot)
-            ?: error("CORE_ACTIVE_SLOT must be 'blue' or 'green' but was '${properties.activeSlot}'"),
-        lastAcceptedToken = 0L,
-    )
+    private var snapshot: Snapshot = initialSnapshot()
+
+    private fun initialSnapshot(): Snapshot {
+        // 파일로 복원하더라도 env 값은 검증한다 — 잘못된 CORE_ACTIVE_SLOT은 설정 오류로 즉시 실패.
+        val configured = Slot.parseOrNull(properties.activeSlot)
+            ?: error("CORE_ACTIVE_SLOT must be 'blue' or 'green' but was '${properties.activeSlot}'")
+
+        val restored = stateStore.read()
+        if (restored != null) {
+            log.info(
+                "core route state restored from file: slot={} lastAcceptedToken={}",
+                restored.slot.wireName, restored.token,
+            )
+            return Snapshot(restored.slot, restored.token)
+        }
+        if (stateStore.enabled) {
+            log.info("no core route state file yet; starting from CORE_ACTIVE_SLOT={}", configured.wireName)
+        }
+        return Snapshot(configured, 0L)
+    }
 
     fun snapshot(): Snapshot = snapshot
 
