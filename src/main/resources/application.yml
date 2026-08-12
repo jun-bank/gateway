@@ -1,0 +1,43 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: jun-bank-gateway
+  cloud:
+    gateway:
+      routes:
+        # 각 도메인 서버는 compose 서비스명(host)·포트 8080으로 뜬다.
+        # StripPrefix=1 로 프리픽스 세그먼트를 제거해 도메인 서버의 루트(/) 기준 경로로 넘긴다.
+        #   /core        -> core:8080  /      (PathPattern `/core/**` 은 프리픽스 세그먼트만 있는 `/core` 도 매칭한다)
+        #   /core/        -> core:8080  /
+        #   /core/health -> core:8080  /health
+        - id: core
+          uri: http://core:8080
+          predicates:
+            - Path=/core/**
+          filters:
+            - StripPrefix=1
+        - id: settlement
+          uri: http://settlement:8080
+          predicates:
+            - Path=/settlement/**
+          filters:
+            - StripPrefix=1
+        - id: ledger
+          uri: http://ledger:8080
+          predicates:
+            - Path=/ledger/**
+          filters:
+            - StripPrefix=1
+
+# 게이트웨이 자신의 준비성만 노출한다(GET /actuator/health).
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      probes:
+        enabled: true

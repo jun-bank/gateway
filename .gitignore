@@ -1,0 +1,17 @@
+build/
+.gradle/
+.kotlin/
+out/
+*.class
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+
+# 로컬 설정 — 자격증명이 들어갈 수 있는 경로는 커밋되지 않는다
+local.properties
+gradle.properties.local
+*.env

@@ -1,0 +1,39 @@
+name: build-and-push
+
+# main 머지 시 컨테이너 이미지를 빌드해 GHCR에 push한다(ADR-024 P3 · cicd.md P3 아티팩트).
+# 빌드는 여기(GitHub Actions)에서 한다 — 로컬 빌드 없음. 배포는 별도로 배포-agent가
+# 이 이미지를 digest로 pull해 수행한다(ADR-027). 태그는 커밋 SHA(불변 식별자 · CD-5).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write   # GHCR push
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: GHCR 로그인
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: 빌드·push (digest 출력)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/jun-bank/gateway:${{ github.sha }}
+            ghcr.io/jun-bank/gateway:latest
+      - name: 이미지 digest 요약
+        run: |
+          echo "이미지: ghcr.io/jun-bank/gateway" >> $GITHUB_STEP_SUMMARY
+          echo "digest: ${{ steps.build.outputs.digest }}" >> $GITHUB_STEP_SUMMARY
+          echo "SHA 태그: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
