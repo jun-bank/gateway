@@ -30,12 +30,19 @@ spring:
 # 블루-그린 전환 대상인 core 라우트의 slot → URI 매핑.
 # 이 매핑의 소유자는 배포 환경(환경변수)이다 — 게이트웨이는 지금 어느 slot이 활성인지만
 # 관리하고, 전환은 POST /internal/routes/core/switch 로 받는다(ADR-031 BG-1 · BG-4 ⓐ).
+#
+# 기본값은 compose 스택의 서비스명 기준이다(다른 라우트와 같은 규칙: 서비스명 host + 8080).
+# 호스트 포트로 배선하는 환경(예: core를 호스트에서 직접 띄우는 경우)은 env로 명시 주입한다.
+#
+# state-file: 설정하면 {활성 slot, 마지막 수락 token}을 그 파일에 write-ahead 로 남기고
+# 기동 시 복원한다(CORE_ACTIVE_SLOT보다 우선). 비우면 기존 인메모리 동작.
 junbank:
   routes:
     core:
-      blue-uri: ${CORE_BLUE_URI:http://host.docker.internal:13001}
-      green-uri: ${CORE_GREEN_URI:http://host.docker.internal:13002}
+      blue-uri: ${CORE_BLUE_URI:http://core:8080}
+      green-uri: ${CORE_GREEN_URI:http://core-green:8080}
       active-slot: ${CORE_ACTIVE_SLOT:blue}
+      state-file: ${CORE_STATE_FILE:}
 
 # 게이트웨이 자신의 준비성만 노출한다(GET /actuator/health).
 management:
