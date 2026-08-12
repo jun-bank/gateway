@@ -1,0 +1,55 @@
+# gateway 배포의 정본 compose 파일.
+#
+# 이 파일은 CD(.github/workflows/deploy.yml)가 배포 요청 manifest 안에 base64로 동봉하고,
+# 그 내용의 sha256을 composeRevision으로 함께 서명해 보낸다. 배포-agent는 서명이 증명한
+# 바이트를 자기 workspace에 기록한 다음 그 파일로만 compose up 한다 — 호스트에 놓여 있는
+# 낡은 compose 파일이 실행되는 경로는 없다(ADR-030 CP-1·CP-2).
+#
+# ⚠️ 이 파일은 서명 동봉 정본이다 — agent의 allowlist(design rev.2.1) 통과 형태만 허용한다.
+#    allowlist는 열린 목록이 아니라 닫힌 목록이라, 아래에 없는 키·문법을 하나라도 더하면
+#    agent가 배포를 거절한다(부작용 0). 형태를 바꾸려면 agent의 검증기를 먼저 바꿔야 한다.
+#
+# 지켜야 하는 형태(요약):
+#   - 최상위 키는 services 하나뿐. 서비스는 정확히 1개(= manifest의 appService).
+#   - 서비스 키는 image·ports·environment·restart·healthcheck·extra_hosts·volumes 만.
+#   - 변수 치환은 CORE_IMAGE 와 DEPLOY_HOST_PORT 두 개만, 그것도 아래의 정확한 형태로만.
+#     기본값 문법(중괄호 안의 :- 표기)은 금지다 — 주입이 실패했을 때 조용히 latest 같은
+#     엉뚱한 이미지로 뜨는 길을 열기 때문이다. 값이 없으면 뜨지 않는 편이 맞다.
+#   - 그 밖의 자리에는 달러 기호 자체를 쓰지 않는다(보간 우회 차단).
+#
+# gateway는 재기동 교체이지 블루-그린이 아니다(ADR-027 DO-20 v0.5 ⓐ) — 자기 자신의
+# 라우트 전환을 자기가 할 수 없어서다. 그래서 슬롯이 없고 compose도 이 한 벌이다.
+
+services:
+  app:
+    # 이미지는 agent가 manifest의 imageDigest에서 만들어 주입한다(내용 주소 고정 — 태그 금지).
+    image: ${CORE_IMAGE}
+    # 호스트 포트는 agent가 주입한다. 컨테이너 포트 8080은 고정이다
+    # (Dockerfile의 EXPOSE·application.yml의 server.port).
+    ports:
+      - "${DEPLOY_HOST_PORT}:8080"
+    # 재시작 정책이 있어야 준비성 검사의 "재시작 횟수 안정" 판정이 의미를 갖는다(CD-1).
+    restart: unless-stopped
+    # 준비성은 컨테이너 안에서 자기 actuator를 찔러 본다. 형태가 고정된 패턴이며
+    # 자유 문자열 셸 명령은 allowlist가 받지 않는다(임의 실행 표면 제거).
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    # 활성 slot과 마지막 수락 token을 재시작 너머로 보존한다(CORE_STATE_FILE이 가리키는 곳).
+    # 이 볼륨이 없으면 게이트웨이가 재기동될 때마다 활성 slot이 env 기본값으로 되돌아간다.
+    volumes:
+      - "/home/jun/jun-deploy/gateway/state:/state:rw"
+    # core는 호스트 포트로 떠 있다(블루/그린 각각). 컨테이너 안에서 호스트에 닿는 이름.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # 값 없는 pass-through 목록이다 — 값은 이 파일이 아니라 호스트 .env가 소유한다(CP-5).
+    # 여기에 리터럴 값을 적으면 서명된 정본과 실제 배선이 두 벌로 갈라지고, allowlist도
+    # 값이 붙은 형태를 거절한다. agent가 자기 프로세스 env에서 아래 키의 값을 읽어
+    # compose 서브프로세스로 넘기며, 등재된 키가 호스트에 없으면 배포를 거절한다.
+    environment:
+      - CORE_BLUE_URI
+      - CORE_GREEN_URI
+      - CORE_ACTIVE_SLOT
+      - CORE_STATE_FILE
