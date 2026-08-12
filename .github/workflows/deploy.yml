@@ -70,6 +70,10 @@ jobs:
       AGENT_URL: https://deploy.junproject.xyz/deploy
       OIDC_AUDIENCE: https://deploy.junproject.xyz
       TARGET: gateway
+      # 배포 요청에 동봉할 정본 compose와, 그 안의 배포 대상 서비스명(manifest.appService).
+      # 경로를 셸 본문에 적지 않고 env로 넘기는 것은 아래 다른 입력들과 같은 이유다.
+      COMPOSE_FILE: deploy/compose.yml
+      APP_SERVICE: app
     steps:
       - name: 배포 대상 SHA 확정
         id: sha
@@ -98,6 +102,19 @@ jobs:
           fi
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "배포 대상 커밋: $SHA"
+
+      # 동봉할 compose는 "배포하는 그 커밋"의 것이어야 한다. 워크플로가 도는 ref(항상 main)의
+      # 파일을 쓰면, 배포 대상 SHA와 실행될 compose가 서로 다른 시점에서 오는 어긋남이 생긴다.
+      # 그래서 manifest의 commitSha와 같은 SHA를 찍어서 받아온다.
+      - name: 정본 compose 체크아웃 (배포 대상 커밋의 것)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.sha.outputs.sha }}
+          # 이 워크스페이스에서 git push 할 일이 없다 — 토큰을 남기지 않는다.
+          persist-credentials: false
+          # 필요한 것은 compose 한 장뿐이라 그것만 받는다(cone 모드 아님 — 경로 그대로).
+          sparse-checkout: deploy/compose.yml
+          sparse-checkout-cone-mode: false
 
       - name: GHCR 로그인
         uses: docker/login-action@v3
@@ -140,21 +157,72 @@ jobs:
           ISSUED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           EXPIRES=$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ)
 
-          # manifest(DO-18 6칸). composeRevision·configVersion은 현재 placeholder다 —
-          # 호스트 compose provisioning(ADR-030 compose-in-manifest)·config 전달(#19)이
-          # 실행에 결박되기 전까지 서명·이력에만 남고 dispatch 동작은 imageDigest로 고정된다.
-          # ⚠️ gateway는 재기동 교체라 green/blue 슬롯 이름이 없다(DO-20 v0.5 ⓐ) — 그래서
-          # composeRevision도 "gateway-v1"이지 코어처럼 "-green-" 을 달지 않는다.
-          # jq -c 로 결정적 바이트를 만든다(digest·서명이 그 바이트에 정확히 걸린다).
-          jq -nc \
-            --arg target "$TARGET" \
-            --arg commitSha "$SHA" \
-            --arg imageDigest "$DIGEST" \
-            --arg composeRevision "gateway-v1" \
-            --arg configVersion "v1" \
-            --arg requestId "$REQ_ID" \
-            '{target:$target, commitSha:$commitSha, imageDigest:$imageDigest, composeRevision:$composeRevision, configVersion:$configVersion, requestId:$requestId}' \
-            > manifest.json
+          # manifest = DO-18 6칸 + compose 동봉 3칸(ADR-030 CP-1·CP-3 · infra#19).
+          # 정본 compose(deploy/compose.yml)를 base64로 싣고, 그 원문의 sha256을
+          # composeRevision으로 함께 서명한다. agent는 서명이 증명한 이 바이트를 자기
+          # workspace에 기록하고 그 파일로만 compose up 한다 — 호스트에 남아 있는 낡은
+          # compose가 실행될 길이 없어진다. appService는 배포 대상 서비스명이고, agent의
+          # DEPLOY_APP_SERVICE·compose 정의·이 값 셋이 일치해야 통과한다(CP-3).
+          # composeRevision은 더 이상 사람이 붙인 이름표가 아니라 내용의 해시다 — gateway가
+          # 슬롯 없는 재기동 교체라는 사실(DO-20 v0.5 ⓐ)은 이 값에 나타나지 않는다.
+          #
+          # ⚠️ 해시와 base64는 같은 메모리 버퍼 하나에서 뽑는다. 파일을 두 번 읽으면 그
+          #    사이의 사소한 차이(후행 개행 처리 같은)가 revision과 내용의 불일치로 남고,
+          #    그건 배포 현장에서야 드러난다. 그래서 조립을 셸 파이프로 잇지 않고 python
+          #    한 프로세스 안에서 끝낸다. 구분자 없는 compact JSON이라 바이트도 결정적이다
+          #    (digest·서명이 이 바이트에 정확히 걸린다 — 이후 manifest.json은 손대지 않는다).
+          export REQ_ID
+          python3 - <<'PY'
+          import base64, hashlib, json, os
+
+
+          def fail(msg):
+              print("::error::" + msg)
+              raise SystemExit(1)
+
+
+          path = os.environ["COMPOSE_FILE"]
+          with open(path, "rb") as f:
+              raw = f.read()          # 정본 compose는 여기서 딱 한 번 읽는다
+          if not raw:
+              fail("정본 compose가 비어 있다: " + path)
+
+          revision = "sha256:" + hashlib.sha256(raw).hexdigest()
+          content = base64.b64encode(raw).decode("ascii")
+
+          body = json.dumps({
+              "target": os.environ["TARGET"],
+              "commitSha": os.environ["SHA"],
+              "imageDigest": os.environ["DIGEST"],
+              "composeRevision": revision,
+              "composeContent": content,
+              "appService": os.environ["APP_SERVICE"],
+              "configVersion": "v1",
+              "requestId": os.environ["REQ_ID"],
+          }, separators=(",", ":")).encode("utf-8")
+
+          # 발행 전 자가 검증 — 방금 만든 manifest를 다시 뜯어서, 동봉된 내용이 정말
+          # composeRevision이 가리키는 바이트인지 우리 손으로 확인한다. 여기서 걸리면
+          # 요청을 보내지 않는다(agent가 거절해 주기를 기대하지 않는다).
+          got = json.loads(body.decode("utf-8"))
+          decoded = base64.b64decode(got["composeContent"], validate=True)
+          if base64.b64encode(decoded).decode("ascii") != got["composeContent"]:
+              fail("composeContent base64 재인코딩 불일치(표준 base64·패딩 확인)")
+          if decoded != raw:
+              fail("composeContent 디코드 결과가 원본 compose 바이트와 다르다")
+          if "sha256:" + hashlib.sha256(decoded).hexdigest() != got["composeRevision"]:
+              fail("composeRevision이 동봉 내용의 sha256과 불일치 — 발행 중단")
+          if not got["appService"]:
+              fail("appService가 비어 있다(CP-3 — 배포 대상 서비스명 필수)")
+          # 요청 body 상한(64KiB)의 절반을 CI에서 미리 막는다(CP-6).
+          if len(body) > 32768:
+              fail("manifest 크기 %d바이트 > 32768 상한(CP-6)" % len(body))
+
+          with open("manifest.json", "wb") as f:
+              f.write(body)
+          print("manifest %d바이트 · composeRevision=%s · appService=%s"
+                % (len(body), got["composeRevision"], got["appService"]))
+          PY
 
           # 게이트 1 — body digest("sha256:"+hex) + canonical 문자열(개행 조인·trailing 없음) + HMAC hex.
           BODY_HEX=$(sha256sum manifest.json | cut -d' ' -f1)
@@ -196,6 +264,7 @@ jobs:
             echo "- target: \`$TARGET\` (재기동 교체 — 블루-그린 아님 · DO-20 v0.5 ⓐ)"
             echo "- reqId: \`$REQ_ID\`"
             echo "- 이미지: \`${IMAGE_REPO}@${DIGEST}\`"
+            echo "- compose: \`$(jq -r '.composeRevision' manifest.json)\` (service \`$APP_SERVICE\`)"
             echo "- HTTP: \`$HTTP_CODE\`"
             echo "- 응답: \`$(cat resp.txt 2>/dev/null | head -c 300)\`"
           } >> "$GITHUB_STEP_SUMMARY"
