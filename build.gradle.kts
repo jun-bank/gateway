@@ -34,6 +34,16 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-actuator")
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin")
     implementation("org.jetbrains.kotlin:kotlin-reflect")
+
+    // 테스트: WebTestClient·JUnit5·AssertJ. 스텁 백엔드는 게이트웨이가 이미 쓰는
+    // reactor-netty HttpServer로 띄운다(모의 서버 라이브러리를 따로 들이지 않는다).
+    testImplementation("org.springframework.boot:spring-boot-starter-test")
+    testImplementation("io.projectreactor:reactor-test")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+}
+
+tasks.withType<Test> {
+    useJUnitPlatform()
 }
 
 kotlin {
