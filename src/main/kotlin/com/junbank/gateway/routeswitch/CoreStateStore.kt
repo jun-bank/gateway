@@ -1,6 +1,5 @@
 package com.junbank.gateway.routeswitch
 
-import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
 import java.io.IOException
 import java.nio.ByteBuffer
@@ -46,8 +45,6 @@ class CoreStateStore(properties: CoreRouteProperties) {
     /** 파일에 남기는 정본 상태. token 은 int64 양수(≥1), 아직 전환이 없었다면 0. */
     data class State(val slot: Slot, val token: Long)
 
-    private val log = LoggerFactory.getLogger(javaClass)
-
     private val path: Path? = properties.stateFile?.trim()
         ?.takeIf { it.isNotEmpty() }
         ?.let { Path.of(it).toAbsolutePath() }
@@ -55,18 +52,32 @@ class CoreStateStore(properties: CoreRouteProperties) {
     /** 지속화가 켜져 있나 — 꺼져 있으면 [read]는 null, [write]는 no-op. */
     val enabled: Boolean get() = path != null
 
-    /** 저장된 상태. 지속화가 꺼져 있거나 파일이 없거나 파싱 불가면 null(= 호출자가 env 기본으로). */
+    /**
+     * 저장된 상태. **파일이 아직 없을 때만** null 이다(= 첫 기동, 호출자가 env 기본으로).
+     *
+     * 파일이 있는데 읽거나 파싱하지 못하면 fail-closed 로 예외를 던진다 — 여기서 env 기본으로
+     * 폴백하면 저장 상태가 green/12 인데 blue/token 0 으로 올라와, 이미 내려간 slot을 가리키고
+     * 지나간 낮은 token까지 다시 수락하게 된다(운영자가 눈치채지 못한 채). 기동을 거절하는 쪽이
+     * 안전하다.
+     */
     fun read(): State? {
         val file = path ?: return null
-        if (!Files.isRegularFile(file)) return null
-        return try {
-            parse(Files.readString(file)).also {
-                if (it == null) log.error("core state file is unreadable, falling back to env: {}", file)
-            }
+        if (!Files.exists(file)) return null
+
+        val text = try {
+            Files.readString(file)
         } catch (e: IOException) {
-            log.error("failed to read core state file {}, falling back to env", file, e)
-            null
+            throw IllegalStateException(unreadable(file, "읽을 수 없다"), e)
         }
+        return parse(text) ?: throw IllegalStateException(unreadable(file, "형식을 해석할 수 없다"))
+    }
+
+    private fun unreadable(file: Path, what: String) = buildString {
+        append("core state file($file)을 $what — 게이트웨이를 안전하게 기동할 수 없다. ")
+        append("이 파일이 정본이므로 임의 폴백(CORE_ACTIVE_SLOT·token 0)은 이미 내려간 slot을 ")
+        append("가리키고 지나간 fencing token을 재수락시킬 수 있다. ")
+        append("복구: 지금 실제로 서비스 중인 slot을 확인한 뒤 손상 파일을 지우고 ")
+        append("CORE_ACTIVE_SLOT=<그 slot> 으로 재기동하라(전환 실행자의 token도 그에 맞춰 올린다).")
     }
 
     /**

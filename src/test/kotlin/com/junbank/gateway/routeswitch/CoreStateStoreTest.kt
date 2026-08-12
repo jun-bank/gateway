@@ -1,6 +1,7 @@
 package com.junbank.gateway.routeswitch
 
 import org.assertj.core.api.Assertions.assertThat
+import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
@@ -41,15 +42,29 @@ class CoreStateStoreTest {
     }
 
     @Test
-    fun `파일이 없거나 읽을 수 없으면 env 기본으로 뜬다`() {
+    fun `파일이 아직 없으면 env 기본으로 뜬다`() {
         val missing = tempDir.resolve("absent")
         assertThat(registryOf(missing, activeSlot = "green").snapshot())
             .isEqualTo(CoreRouteRegistry.Snapshot(Slot.GREEN, 0))
+    }
 
+    @Test
+    fun `파일이 손상됐거나 읽히지 않으면 기동을 거절한다`() {
+        // 조용히 env로 폴백하면 이미 내려간 slot을 가리키고 지나간 token까지 재수락된다.
         val corrupt = tempDir.resolve("corrupt")
         Files.writeString(corrupt, "slot=purple\ntoken=oops\n")
-        assertThat(registryOf(corrupt, activeSlot = "blue").snapshot())
-            .isEqualTo(CoreRouteRegistry.Snapshot(Slot.BLUE, 0))
+
+        assertThatThrownBy { registryOf(corrupt, activeSlot = "blue") }
+            .isInstanceOf(IllegalStateException::class.java)
+            .hasMessageContaining(corrupt.toString())
+            .hasMessageContaining("해석할 수 없다")
+            .hasMessageContaining("CORE_ACTIVE_SLOT") // 복구 지침
+
+        // 읽기 자체가 실패하는 경우(경로가 디렉터리)도 같다.
+        val unreadable = Files.createDirectory(tempDir.resolve("unreadable"))
+        assertThatThrownBy { registryOf(unreadable, activeSlot = "blue") }
+            .isInstanceOf(IllegalStateException::class.java)
+            .hasMessageContaining(unreadable.toString())
     }
 
     @Test

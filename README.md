@@ -97,8 +97,12 @@ token까지 낮추면 그 사이 값을 든 stale 실행자가 나중에 수락�
 설정하지 않으면 상태는 인메모리다 — 게이트웨이가 재시작하면 `CORE_ACTIVE_SLOT` · token 0
 으로 리셋되고, 그 짧은 창에서 이미 지나간 낮은 token이 한 번 수락될 수 있다(알려진 리스크).
 
-경로를 주면 `{활성 slot, 마지막 수락 token}` 을 그 파일에 남기고 기동 시 복원한다(파일이
-`CORE_ACTIVE_SLOT` 보다 우선하며, 파일이 없거나 깨졌으면 env 기본으로 뜬다).
+경로를 주면 `{활성 slot, 마지막 수락 token}` 을 그 파일에 남기고 기동 시 복원한다 — 파일이
+`CORE_ACTIVE_SLOT` 보다 우선한다. **파일이 아직 없을 때만** env 기본으로 뜨고, 파일이 있는데
+읽거나 해석하지 못하면 **기동을 거절한다**(fail-closed). 조용히 env로 폴백하면 이미 내려간
+slot을 가리키고 지나간 fencing token까지 다시 수락하게 되기 때문이다. 이때는 지금 실제로
+서비스 중인 slot을 확인해 손상 파일을 지우고 `CORE_ACTIVE_SLOT` 을 그 slot으로 주어
+재기동한다(예외 메시지에 같은 지침이 들어 있다).
 
 ```sh
 CORE_STATE_FILE=/var/lib/jun-bank/gateway/core-state   # 재시작을 넘겨 쓰려면 볼륨에

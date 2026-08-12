@@ -24,8 +24,10 @@ const val CORE_ROUTE_ID = "core"
  * `lastAcceptedToken` 계약: fencing token 은 **int64 양수(≥1)** 이고, 아직 전환이 없었음을
  * 뜻하는 0 만이 예외다. 전환은 단조 증가 방향으로만 수락된다(같은 값 재요청은 멱등).
  *
- * 기동 시 상태: `CORE_STATE_FILE`이 설정돼 있고 파일이 읽히면 그 {slot, token}으로 복원하고
- * (env `CORE_ACTIVE_SLOT`보다 우선), 아니면 activeSlot = CORE_ACTIVE_SLOT · token = 0 이다.
+ * 기동 시 상태: `CORE_STATE_FILE`이 설정돼 있고 파일이 있으면 그 {slot, token}으로 복원한다
+ * (env `CORE_ACTIVE_SLOT`보다 우선). 파일이 아직 없을 때만 activeSlot = CORE_ACTIVE_SLOT ·
+ * token = 0 으로 뜨고, 파일이 있는데 읽거나 해석하지 못하면 **기동을 거절한다**(fail-closed —
+ * 조용히 env로 폴백하면 이미 내려간 slot을 가리킬 수 있다. [CoreStateStore.read] 참조).
  *
  * 알려진 잔여(지속화를 끈 경우 = `CORE_STATE_FILE` 미설정): 상태가 인메모리라 게이트웨이가
  * 재시작하면 activeSlot = CORE_ACTIVE_SLOT, lastAcceptedToken = 0 으로 리셋된다. 즉 재시작
