@@ -43,6 +43,9 @@ class RouteSwitchNoDowntimeTest {
             registry.add("junbank.routes.core.blue-uri") { blue.uri }
             registry.add("junbank.routes.core.green-uri") { green.uri }
             registry.add("junbank.routes.core.active-slot") { "blue" }
+            // 무서명 부하 요청이 통과하도록 audit 모드(키는 필수 — 없으면 컨텍스트 기동 실패).
+            registry.add("junbank.internal-auth.mode") { "audit" }
+            registry.add("junbank.internal-auth.hmac-key") { "test-internal-key-not-a-secret" }
         }
 
         @JvmStatic
