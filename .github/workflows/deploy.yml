@@ -171,7 +171,11 @@ jobs:
           #    그건 배포 현장에서야 드러난다. 그래서 조립을 셸 파이프로 잇지 않고 python
           #    한 프로세스 안에서 끝낸다. 구분자 없는 compact JSON이라 바이트도 결정적이다
           #    (digest·서명이 이 바이트에 정확히 걸린다 — 이후 manifest.json은 손대지 않는다).
-          export REQ_ID
+          # 아래 python은 입력을 전부 os.environ에서 읽는다. REQ_ID는 이 셸에서 만든 값이라
+          # 반드시 export가 필요하고, 나머지는 step·job env로 이미 환경에 있지만 함께 적어
+          # 둔다 — "이 변수들이 자식 프로세스까지 간다"가 눈으로 확정되는 편이 낫다(무해).
+          # 값이 없는 변수는 export 해도 환경에 실리지 않아, python이 KeyError로 멈춘다.
+          export REQ_ID SHA DIGEST TARGET APP_SERVICE COMPOSE_FILE
           python3 - <<'PY'
           import base64, hashlib, json, os
 
