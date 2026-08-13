@@ -47,6 +47,11 @@ class RouteSwitchApiTest {
             registry.add("junbank.routes.core.blue-uri") { blue.uri }
             registry.add("junbank.routes.core.green-uri") { green.uri }
             registry.add("junbank.routes.core.active-slot") { "blue" }
+            // 이 테스트는 전환 계약(B6)만 본다 — 무서명 요청이 통과하도록 audit 모드로 둔다
+            // (인가 필터 자체의 계약은 InternalAuthFilterTest가 별도로 검증한다). 키는 audit·
+            // enforce 모두 필수라 여기서도 반드시 준다(없으면 컨텍스트가 기동하지 못한다).
+            registry.add("junbank.internal-auth.mode") { "audit" }
+            registry.add("junbank.internal-auth.hmac-key") { "test-internal-key-not-a-secret" }
         }
 
         @JvmStatic

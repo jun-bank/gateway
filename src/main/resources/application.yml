@@ -43,6 +43,17 @@ junbank:
       green-uri: ${CORE_GREEN_URI:http://core-green:8080}
       active-slot: ${CORE_ACTIVE_SLOT:blue}
       state-file: ${CORE_STATE_FILE:}
+  # /internal 관리 표면 HMAC 인가(라우트 조회·전환). 배포 agent만 이 표면을 호출할 수 있음을
+  # canonical-v1 서명으로 증명한다. 키는 infra agent의 GATEWAY_INTERNAL_HMAC_KEY와 같은 값이며
+  # 배포 게이트 1의 AGENT_HMAC_KEY와는 별도다(다른 신뢰 경계). 상세는 InternalAuthWebFilter.
+  #   mode: audit(무서명 통과+WARN·서명은 검증) | enforce(무서명·불일치 401). 미설정 기본 = enforce.
+  #   hmac-key: 미설정이면 audit·enforce 모두 기동 거부(fail-closed — 값은 로그·응답 미노출).
+  #   skew-seconds: 신선도 창(LAN 내부 기본 30s · [구현 검증]).
+  internal-auth:
+    mode: ${GATEWAY_INTERNAL_AUTH_MODE:enforce}
+    hmac-key: ${GATEWAY_INTERNAL_HMAC_KEY:}
+    skew-seconds: ${GATEWAY_INTERNAL_SKEW_SECONDS:30}
+    max-body-bytes: ${GATEWAY_INTERNAL_MAX_BODY_BYTES:65536}
 
 # 게이트웨이 자신의 준비성만 노출한다(GET /actuator/health).
 management:
