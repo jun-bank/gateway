@@ -26,6 +26,8 @@ class InternalCanonicalV1GoldenTest {
 
     private val goldenKey = "golden-vector-key-not-a-secret".toByteArray(StandardCharsets.UTF_8)
 
+    // ⚠️ 아래 canonical·sig는 **설계 design.md rev.2.1(R5)의 canonical-v1 규격값**이다(규격 단일
+    // 출처 = 그 문서). infra repo의 internal_signing_test.go goldenVectors와 바이트 동일해야 한다.
     private val vectors = listOf(
         Vector(
             name = "GET status (empty body)",
@@ -94,24 +96,30 @@ class InternalCanonicalV1GoldenTest {
         assertThat(InternalCanonicalV1.decodeHexOrNull("ab")).isEqualTo(byteArrayOf(0xAB.toByte()))
     }
 
-    // 필터 생성자의 fail-closed: 키 없음·모드 화이트리스트 밖이면 예외(컨텍스트 기동 차단).
+    // 필터 생성자의 fail-closed: 키 없음/공백·모드 화이트리스트 밖이면 예외(컨텍스트 기동 차단).
     @Test
-    fun `키 없으면 필터 생성이 실패한다`() {
-        assertThatThrownBy { InternalAuthWebFilter(InternalAuthProperties(mode = "enforce", hmacKey = "")) }
-            .isInstanceOf(IllegalStateException::class.java)
-        assertThatThrownBy { InternalAuthWebFilter(InternalAuthProperties(mode = "audit", hmacKey = "")) }
-            .isInstanceOf(IllegalStateException::class.java)
+    fun `키 없거나 공백뿐이면 필터 생성이 실패한다`() {
+        // C4: 빈 키·공백뿐인 키 둘 다 거부(길이만 보면 공백 키가 샌다).
+        for (badKey in listOf("", "   ", "\t")) {
+            assertThatThrownBy { InternalAuthWebFilter(InternalAuthProperties(mode = "enforce", hmacKey = badKey)) }
+                .describedAs("enforce key=%s", badKey).isInstanceOf(IllegalStateException::class.java)
+            assertThatThrownBy { InternalAuthWebFilter(InternalAuthProperties(mode = "audit", hmacKey = badKey)) }
+                .describedAs("audit key=%s", badKey).isInstanceOf(IllegalStateException::class.java)
+        }
     }
 
+    // C1: 모드는 정확히 "audit"·"enforce"만 수락 — 대소문자 변형·주변 공백·미지값·빈값 전부
+    // 기동 거부(변형이 audit로 접혀 무서명이 열리는 fail-open 차단). 뮤테이션: parseMode를
+    // trim().lowercase()로 되돌리면 'AUDIT'·' audit '가 통과해 이 테스트가 붉어진다.
     @Test
-    fun `알 수 없는 모드는 필터 생성이 실패한다`() {
-        assertThatThrownBy { InternalAuthWebFilter(InternalAuthProperties(mode = "on", hmacKey = "k")) }
-            .isInstanceOf(IllegalStateException::class.java)
-    }
-
-    @Test
-    fun `유효한 설정은 필터가 만들어진다`() {
+    fun `모드는 정확 비교 - 변형은 모두 기동 거부`() {
+        // 정상 두 리터럴은 만들어진다.
         InternalAuthWebFilter(InternalAuthProperties(mode = "enforce", hmacKey = "k"))
         InternalAuthWebFilter(InternalAuthProperties(mode = "audit", hmacKey = "k"))
+        // 대소문자 변형·공백 포함·미지값·빈값(미설정과 구분되는 명시적 빈 문자열)은 전부 거부.
+        for (badMode in listOf("AUDIT", "Audit", "ENFORCE", " audit ", "audit ", " enforce", "on", "off", "true", "")) {
+            assertThatThrownBy { InternalAuthWebFilter(InternalAuthProperties(mode = badMode, hmacKey = "k")) }
+                .describedAs("mode=%s", badMode).isInstanceOf(IllegalStateException::class.java)
+        }
     }
 }
