@@ -47,11 +47,12 @@ class InternalAuthWebFilter(props: InternalAuthProperties) : WebFilter, Ordered 
     private val log = LoggerFactory.getLogger(javaClass)
 
     private val mode: InternalAuthMode = parseMode(props.mode)
+    // C4: 공백뿐인 키("   ")도 키 없음과 동일 취급(isBlank) — 길이만 보면 공백 키가 유효로 샌다.
     private val key: ByteArray = props.hmacKey
-        .takeIf { it.isNotEmpty() }
+        .takeIf { it.isNotBlank() }
         ?.toByteArray(StandardCharsets.UTF_8)
         ?: throw IllegalStateException(
-            "GATEWAY_INTERNAL_HMAC_KEY 미설정 — /internal 인가 필터를 세울 수 없다(fail-closed). " +
+            "GATEWAY_INTERNAL_HMAC_KEY 미설정(또는 공백뿐) — /internal 인가 필터를 세울 수 없다(fail-closed). " +
                 "audit·enforce 모두 키가 필수다(키 없으면 검증 못 하는 경계라 audit 성공 위장이 된다).",
         )
     private val skewSeconds: Long = props.skewSeconds
@@ -175,12 +176,15 @@ class InternalAuthWebFilter(props: InternalAuthProperties) : WebFilter, Ordered 
         const val SIGNATURE_HEADER = "X-Internal-Signature"
         const val TIMESTAMP_HEADER = "X-Internal-Timestamp"
 
-        fun parseMode(raw: String): InternalAuthMode = when (raw.trim().lowercase()) {
+        // 정확 비교(원문 그대로 · 대소문자 구분 · 주변 공백 불허). trim·lowercase 하면
+        // ` AUDIT `·`AUDIT`이 audit로 접혀 무서명이 열린다(codex 재현 — 실 fail-open). 계약은
+        // **정확히 "audit" 또는 "enforce"**, 그 밖(대소문자 변형·공백 포함·미지값·빈값) 전부 기동 거부.
+        fun parseMode(raw: String): InternalAuthMode = when (raw) {
             "audit" -> InternalAuthMode.AUDIT
             "enforce" -> InternalAuthMode.ENFORCE
             else -> throw IllegalStateException(
-                "GATEWAY_INTERNAL_AUTH_MODE는 audit|enforce 여야 한다(미설정 기본 enforce) — 받은 값='$raw'. " +
-                    "알 수 없는 값으로 조용히 열지 않는다(fail-closed).",
+                "GATEWAY_INTERNAL_AUTH_MODE는 정확히 'audit' 또는 'enforce' 여야 한다(대소문자 구분·주변 공백 불허·미설정 기본 enforce) — 받은 값='$raw'. " +
+                    "변형(예: 'AUDIT'·' audit ')을 조용히 수락하면 무서명이 열린다(fail-closed).",
             )
         }
 

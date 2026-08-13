@@ -3,10 +3,12 @@ package com.junbank.gateway.routeswitch
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
+import org.springframework.boot.test.web.server.LocalServerPort
 import org.springframework.http.MediaType
 import org.springframework.test.context.DynamicPropertyRegistry
 import org.springframework.test.context.DynamicPropertySource
 import org.springframework.test.web.reactive.server.WebTestClient
+import java.net.Socket
 import java.nio.charset.StandardCharsets
 import java.time.Instant
 
@@ -14,12 +16,14 @@ import java.time.Instant
 internal object TestSigner {
     const val KEY = "test-internal-key-not-a-secret"
 
-    fun sign(key: String, method: String, path: String, body: ByteArray, ts: Long): Pair<String, String> {
-        val tsStr = ts.toString()
+    fun sign(key: String, method: String, path: String, body: ByteArray, ts: Long): Pair<String, String> =
+        signRawTs(key, method, path, body, ts.toString()) to ts.toString()
+
+    /** timestamp 문자열을 canonical에 verbatim으로 실어 서명한다(엄격10진 게이트 격리 검증용). */
+    fun signRawTs(key: String, method: String, path: String, body: ByteArray, tsStr: String): String {
         val digest = InternalCanonicalV1.bodyDigest(body)
         val canonical = InternalCanonicalV1.canonical(method, path, digest, tsStr)
-        val sig = InternalCanonicalV1.hex(InternalCanonicalV1.hmac(key.toByteArray(StandardCharsets.UTF_8), canonical))
-        return sig to tsStr
+        return InternalCanonicalV1.hex(InternalCanonicalV1.hmac(key.toByteArray(StandardCharsets.UTF_8), canonical))
     }
 
     fun now(): Long = Instant.now().epochSecond
@@ -44,6 +48,9 @@ class InternalAuthEnforceTest {
 
     @Autowired
     private lateinit var client: WebTestClient
+
+    @LocalServerPort
+    private var port: Int = 0
 
     companion object {
         @JvmStatic
@@ -118,6 +125,22 @@ class InternalAuthEnforceTest {
         }
     }
 
+    // C3⑵: strict-decimal 게이트 격리 검증. bad ts를 canonical에 **verbatim으로 서명**하고
+    // (HMAC은 통과할 형태) parse 값은 skew 안이라, 401을 내는 유일한 이유가 strict-decimal이다.
+    // 뮤테이션: isStrictDecimal 게이트를 지우면 이 요청이 통과(200)해 이 테스트가 붉어진다.
+    @Test
+    fun `strict-decimal 게이트만으로 거절한다 - HMAC은 통과하는 형태`() {
+        val now = TestSigner.now()
+        // "+<now>"·"0<now>"는 parse하면 now(=skew 안)지만 앞자리 부호·0이라 엄격10진 위반.
+        for (badTs in listOf("+$now", "0$now")) {
+            val sig = TestSigner.signRawTs(TestSigner.KEY, "GET", "/internal/routes/core", ByteArray(0), badTs)
+            client.get().uri("/internal/routes/core")
+                .header("X-Internal-Signature", sig)
+                .header("X-Internal-Timestamp", badTs)
+                .exchange().expectStatus().isUnauthorized
+        }
+    }
+
     @Test
     fun `POST body 바꿔치기는 401 (헤더 digest 불신)`() {
         val signedBody = """{"targetSlot":"green","fencingToken":5}""".toByteArray(StandardCharsets.UTF_8)
@@ -150,15 +173,48 @@ class InternalAuthEnforceTest {
     }
 
     @Test
-    fun `경로 우회 변형도 필터를 통과하지 못한다 (무서명 401)`() {
-        // 정규화하면 /internal/routes/core 로 라우팅되는 변형들 — 인가 없이 컨트롤러에 닿으면 안 된다.
-        // (클라이언트/서버 어느 쪽에서 정규화되든, 이 변형들이 무서명 200으로 새면 안 된다.)
+    fun `경로 우회 변형도 필터를 통과하지 못한다 (무서명, 클라이언트 정규화)`() {
+        // WebTestClient 정규화 경로(참고용) — 어느 쪽에서 정규화되든 무서명 200으로 새면 안 된다.
         for (raw in listOf(
             "/internal/routes/../routes/core",
             "/internal/routes/./core",
             "/internal//routes/core",
         )) {
             client.get().uri(raw).exchange().expectStatus().isUnauthorized
+        }
+    }
+
+    // C3⑶: 서버측 RequestPath 판정을 raw 요청으로 실증(curl --path-as-is 등가 — 클라이언트 정규화
+    // 배제). 인코딩·이중슬래시·인코딩 dot-segment 변형이 무서명으로 컨트롤러 2xx에 닿으면 안 된다
+    // (N2 — 필터 매처와 핸들러 매핑이 같은 RequestPath 소스라 우회가 성립하지 않는다).
+    @Test
+    fun `서버측 raw 경로 변형도 무서명으로 통과하지 못한다`() {
+        val variants = listOf(
+            "/%69nternal/routes/core", // %69 = 'i'
+            "//internal/routes/core", // 선행 이중 슬래시
+            "/internal/routes/%2e%2e/routes/core", // 인코딩된 ..
+            "/internal/routes/core/%2e", // 인코딩된 .
+        )
+        for (target in variants) {
+            val status = rawRequestStatus("GET", target)
+            // 보안 불변식: 무서명 요청은 어떤 변형으로도 2xx(컨트롤러 성공)에 닿지 못한다.
+            assert(status !in 200..299) { "무서명 raw 경로 '$target'가 2xx로 샜다: status=$status" }
+            // 실제로 처리돼 거절/미라우팅됨(연결 오류 -1 아님).
+            assert(status == 401 || status == 400 || status == 404) {
+                "raw 경로 '$target' status=$status, 401·400·404 기대(필터 차단 또는 미라우팅)"
+            }
+        }
+    }
+
+    /** request-target을 정규화 없이 그대로 전송하는 raw HTTP/1.1 GET — 상태 코드만 읽는다. */
+    private fun rawRequestStatus(method: String, target: String): Int {
+        Socket("127.0.0.1", port).use { sock ->
+            sock.soTimeout = 5000
+            val req = "$method $target HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+            sock.getOutputStream().apply { write(req.toByteArray(StandardCharsets.US_ASCII)); flush() }
+            val statusLine = sock.getInputStream().bufferedReader(StandardCharsets.US_ASCII).readLine() ?: return -1
+            // "HTTP/1.1 401 Unauthorized" → 401
+            return statusLine.split(" ").getOrNull(1)?.toIntOrNull() ?: -1
         }
     }
 
