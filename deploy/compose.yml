@@ -53,3 +53,8 @@ services:
       - CORE_GREEN_URI
       - CORE_ACTIVE_SLOT
       - CORE_STATE_FILE
+      # /internal 관리 표면 HMAC 인가(#6). 모드는 audit/enforce, 키는 값 없는 pass-through
+      # (시크릿이라 이 파일에 리터럴 금지 — 값은 호스트 .env가 소유한다 · CP-5). 둘 다
+      # 호스트 .env에 없으면 agent가 배포를 거절하고, gateway는 키 없으면 기동을 거부한다.
+      - GATEWAY_INTERNAL_AUTH_MODE
+      - GATEWAY_INTERNAL_HMAC_KEY
