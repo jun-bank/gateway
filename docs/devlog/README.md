@@ -16,5 +16,7 @@ gateway 자신의 배포는 core와 달리 **재기동 교체**다 — 자기 �
 | #4 | #3 | [pr-04-gateway-cd.md](pr-04-gateway-cd.md) | gateway CD — 네 번째 배포 대상이 되다 |
 | #5 | — | [pr-05-ci-test.md](pr-05-ci-test.md) | 이미지 발행 전 테스트 — 발행 관문 |
 | #9 | — | [pr-09-compose-embed.md](pr-09-compose-embed.md) | 정본 compose 신설 + manifest 동봉 |
+| #12 | #6 | [pr-06-internal-authz.md](pr-06-internal-authz.md) | /internal HMAC 인가 — fencing≠인가·무중단 이관 |
+| #13 | #7 | [pr-07-ci-cleanup.md](pr-07-ci-cleanup.md) | CI 정비 — 빌드 1회화·wrapper 검증 |
 
 infra 쪽의 전체 여정은 infra repo의 `docs/devlog/`, 아키텍처 해설은 docs repo의 `study/tech/infra-journey/`에 있다.
